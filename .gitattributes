@@ -1,0 +1,11 @@
+# 文华财经指标文件：GBK 编码 + CRLF，绝不做换行/编码转换
+*.XTRD -text
+
+# 二进制
+*.xlsx binary
+*.xls  binary
+
+# 文本
+*.py   text
+*.md   text
+*.json text

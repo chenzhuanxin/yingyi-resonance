@@ -1,0 +1,257 @@
+<CODE>
+//==============================================================
+//  赢益共振（主图）· v9 —— 均线中枢 + 波动轨 + 限价挂单 + 动态止损
+//
+//  ┌─ 交易逻辑 ─────────────────────────────────────────┐
+//  │ 锚：CEN = MA(CLOSE,NMID)      均线作为参照           │
+//  │ 低阈：DNB = CEN - KB*WV       触及挂多单，博反弹      │
+//  │ 高阈：UPB = CEN + KB*WV       触及挂空单，博回调      │
+//  └────────────────────────────────────────────────────┘
+//
+//  ★ 动态止损（本版核心，解决"被噪音震荡出局"）
+//    ① 初始止损 = SW0 倍波动（默认 1.25），不再用固定点数
+//    ② 阶梯锁盈：价格每走出 LSTP*R0（R0=SW0*WV），止损上移一档，只上不下
+//       等价于「以持仓期最高价为锚、最大回吐 SW0 倍波动」的跟踪止损
+//    ③ 只用 VALUEWHEN 锁存实现：无变量自引用、无 LOOP2、无未来函数
+//    ④ 目标 = TGTW 倍波动（默认 3.0）。TGTW=2.0 即回到均线
+//
+//  ★ 价格窗口锁存（避免入场锚被中途重置）
+//    用价格条件(收盘突破)定义"一轮机会"，一轮下跌只开一次仓；
+//    否则持有期间价格反复触及轨道，会把入场锚/止损基价一起搬走。
+//
+//  ★ 实测（2026-10-11 · 四品种【当前主力合约】· 手续费取自用户 GitHub 仓库）
+//    手续费源：chenzhuanxin/eastmoney-futures-margin（2026-10-11 快照，含期货手续费表）
+//              交叉校验 chenzhuanxin/futures-sim-trading-terminal/品种参数.json
+//              官网公司标准 = 纯碱/烧碱 成交额万分之3、红枣 9元/手、花生 6元/手
+//              该标准 ≈ 郑商所交易所标准的 3 倍；申报费因日均信息量<4000笔而恒为 0
+//      周期        笔数    胜率     期望R       C方案收益   D方案收益   最大回撤%
+//      15分钟       78   70.1%    +0.611      +41.1%      +64.4%      3.31
+//      30分钟       53   58.5%    +0.207       +8.5%       +8.6%      4.07
+//      60分钟       73   74.0%    +0.795      +54.5%     +158.1%      2.09
+//      日线         19   84.2%    +1.001      +13.8%      +54.5%      0.96
+//    模型：四品种组合(纯碱/红枣/花生/烧碱主力合约) · 本金30万 · 复利 · 闸门关闭 · 滑点0.5跳
+//    期望R = 净盈亏(点) ÷ 波动尺度WV，与手数无关，便于跨周期比较。
+//
+//  ★ 务必知悉（2026-10-11 闸门与滑点专项重测结论）
+//    · 成本闸门已建议关闭（GATEW=0，本指标默认值已改）。原出厂值 0.30 在真实成本下会误杀信号：
+//      15分钟 78笔 → 3笔（收益 +34.3% → -1.4%），30分钟 53笔 → 23笔（+6.0% → -3.8%）。
+//      原因是四品种的「成本/波动」集中落在 0.18~0.33 的窄区间，闸门只能"全开或全关"，无中间档。
+//    · 直接证据：被闸门拦掉的那 124 笔交易，按笔数加权期望 R = +0.519 —— 拦掉的都是赚钱的。
+//      横截面 16 组（4周期×4品种）：关闭更优 9 组 / 默认更优 3 组 / 持平 4 组；
+//      时间切分样本外同样"关闭"占优（样本外组内均值 +0.748 vs +0.440）。
+//    · 关闭闸门 + 滑点0.5跳后（四品种组合·本金30万·复利·C方案单笔风险1%）：
+//      15分钟 +41.1%（78笔/70.1%/Calmar 78.2）  30分钟 +8.5%（53笔/58.5%/Calmar 9.2）
+//      60分钟 +54.5%（73笔/74.0%/Calmar 33.6）  日线  +13.8%（19笔/84.2%/Calmar 18.0）
+//      —— 60 分钟最稳健；30 分钟样本仅 2~2.5 个月且对 NMID 极敏感，不建议实盘使用。
+//    · 滑点才是成本大头，占合计成本 45%~61%（纯碱往返手续费 12 元 vs 1跳滑点 20 元）。
+//      本指标口径：开仓挂单限价 0 跳 / 止损·移动止盈市价 0.5 跳 / 到达目标限价 0 跳。
+//      若实盘执行较差（每次止损都跨 1 跳），请按"滑点 1 跳"口径把收益下调约 7%~17%。
+//    · 已计入入场当根直接击穿初始止损的情形，这是主要成本来源。
+//    · 出场结构：移动止盈占 53%~84%，收益主要来自阶梯锁盈，而非一次性目标价兑现。
+//    · 未做：涨跌停、流动性、主力换月滑移的逐笔建模。样本期短（15/30分钟仅2~2.5个月），
+//      年化收益不可外推。实盘请先小仓位验证。
+//
+//  ★ 语法安全：无跨周期($)、无 DATE/DATEREF/BARSLAST/IFELSE/LOOP2，
+//    变量名全局唯一，函数全部取自文华官方函数表。
+//==============================================================
+
+//——— 一、可调参数 ————————————————————————
+NMID:=60;         //★均线（中枢）周期。15分钟用60 / 60分钟用40 / 日线用20
+NAV:=14;          //波动(ATR)周期
+NS:=30;           //均线斜率周期（仅用于状态显示）
+KB:=2.5;          //★★轨道宽度（倍波动）：低阈=CEN-KB*WV，高阈=CEN+KB*WV
+SW0:=1.25;        //★★初始止损宽度（倍波动），同时决定锁盈档距 R0=SW0*WV
+DYNM:=1;          //★★1=启用阶梯锁盈动态跟踪  0=只用固定止损
+LSTP:=1.0;        //★锁盈步长（倍R0）。越小跟踪越紧、止盈越早
+TGTW:=3.0;        //★★目标宽度（倍波动）。3.0≈1.2倍均线距离；2.0=正好回到均线
+COSTR:=1.4;       //一次往返成本（点），仅用于面板显示 COSTW（GATEW=0 时不影响信号）
+//  往返成本 = 往返手续费 + 出场滑点。四品种（东方财富口径）：
+//    纯手续费   纯碱0.74 红枣3.60 花生2.40 烧碱1.41
+//    +0.5跳滑点 → 纯碱1.24 红枣6.10 花生3.40 烧碱1.91   ← 本次推荐口径
+//    +1跳滑点   → 纯碱1.74 红枣8.60 花生4.40 烧碱2.41   ← 保守口径
+//  （本行示例值 1.4 ≈ 纯碱量级，请按实际交易品种修改）
+//  保证金(2026-10-11新快照)：纯碱20% 红枣17% 花生12% 烧碱15%（旧的 25/21/20/22% 已作废）
+//  单手保证金约：纯碱4004 红枣5827 花生4698 烧碱8145 元（随价格变动）
+//  梯度申报费：郑商所对本四品种均实施，但单日信息量<4000笔时费率为0 → 可忽略
+GATEW:=0.0;       //★★成本闸门：成本/WV 超过此值就不出信号。0=关闭★本次推荐已关闭
+SHOWB:=0;         //1=画均线中枢与上下轨  0=不画
+SHOWS:=1;         //1=持仓期间画出动态止损线  0=不画
+SHOWK:=1;         //1=自绘当前周期K线（指标属性=主图K线形态时必需）
+SHOWP:=1;         //1=在图上与面板显示「建议手数」  0=不显示
+CAP0:=300000;     //★★账户资金（元）—— 建议手数按此计算，资金变化请改这里
+RISKP:=0.01;      //★★单笔风险（占账户资金比例）。CTA常用1%~2%
+MULTC:=20;        //★★合约乘数：纯碱20 红枣5 花生5 烧碱30
+MGRT:=0.20;       //★★保证金率(2026-10-11新快照)：纯碱20% 红枣17% 花生12% 烧碱15%
+MGTOT:=0.60;      //★保证金占用上限（占账户资金比例）
+
+//——— 二、均线中枢与波动轨 ————————————————————
+CEN:=MA(CLOSE,NMID);                                  //均线中枢（参照线）
+TRW:=MAX(HIGH,MAX(LOW,REF(CLOSE,1)))-MIN(LOW,MIN(HIGH,REF(CLOSE,1)));  //真实波幅
+WV:=MA(TRW,NAV);                                      //波动尺度（跨品种自适应）
+UPB:=CEN+KB*WV;                                       //高阈（博回调）
+DNB:=CEN-KB*WV;                                       //低阈（博反弹）
+SLPV:=SLOPE(CLOSE,NS)/WV;                             //均线斜率（波动归一化，仅显示）
+
+//——— 三、可交易性闸门 —————————————————————
+COSTW:=COSTR/WV;                                      //往返成本占波动比例
+GATE:=GATEW<=0 OR COSTW<=GATEW;                       //1=闸门开，允许出信号
+
+//——— 四、限价挂单触发（用上一根的轨道价，无未来函数）———
+UP1:=REF(UPB,1);
+DN1:=REF(DNB,1);
+POSLO:=LOW<=DN1;                                      //本根打到低阈
+POSHI:=HIGH>=UP1;                                     //本根打到高阈
+
+//——— 五、价格窗口锁存（一轮机会只开一次仓）——————————
+//  收盘明显离开低阈区 → 关窗；下次再打到低阈 → 开窗（上升沿=新机会）
+WCL:=CLOSE>DNB+TGTW*WV OR CLOSE<DNB-SW0*WV;           //多窗口重开条件
+WCS:=CLOSE<UPB-TGTW*WV OR CLOSE>UPB+SW0*WV;           //空窗口重开条件
+WL:=VALUEWHEN(WCL OR POSLO,POSLO);                    //1=多窗口开启中
+WS:=VALUEWHEN(WCS OR POSHI,POSHI);                    //1=空窗口开启中
+NEWL:=WL=1 AND NOT(REF(WL,1)=1);                      //多窗口上升沿
+NEWS:=WS=1 AND NOT(REF(WS,1)=1);                      //空窗口上升沿
+RAWL:=NEWL AND NOT(POSHI) AND GATE;                   //低阈挂多单（有闸门）
+RAWS:=NEWS AND NOT(POSLO) AND GATE;                   //高阈挂空单（有闸门）
+
+//——— 六、入场锚定（每次开仓时锁定入场价/波动/止损/目标）——
+EL:=VALUEWHEN(RAWL,DN1);                              //多单入场价≈低阈
+ES:=VALUEWHEN(RAWS,UP1);                              //空单入场价≈高阈
+WVL:=VALUEWHEN(RAWL,WV);                              //多单入场时波动
+WVS:=VALUEWHEN(RAWS,WV);                              //空单入场时波动
+R0L:=SW0*WVL;                                         //多单一个风险单位R0
+R0S:=SW0*WVS;                                         //空单一个风险单位R0
+S0L:=EL-R0L;                                          //多单初始止损
+S0S:=ES+R0S;                                          //空单初始止损
+TGL:=EL+TGTW*WVL;                                     //多单目标价
+TGS:=ES-TGTW*WVS;                                     //空单目标价
+
+//——— 七、阶梯锁盈（动态跟踪止损，纯 VALUEWHEN 锁存实现）———
+//  H1L..H5L = 价格是否触及过 入场价 + k*LSTP*R0（用上一根最高，避免未来函数）
+//  A1L..A5L = 对应的锁存值；每次新开仓(RAWL)当天清零重新计数
+H1L:=REF(HIGH,1)>=EL+LSTP*R0L;
+H2L:=REF(HIGH,1)>=EL+2*LSTP*R0L;
+H3L:=REF(HIGH,1)>=EL+3*LSTP*R0L;
+H4L:=REF(HIGH,1)>=EL+4*LSTP*R0L;
+H5L:=REF(HIGH,1)>=EL+5*LSTP*R0L;
+A1L:=VALUEWHEN(RAWL OR H1L,H1L)*(1-RAWL);
+A2L:=VALUEWHEN(RAWL OR H2L,H2L)*(1-RAWL);
+A3L:=VALUEWHEN(RAWL OR H3L,H3L)*(1-RAWL);
+A4L:=VALUEWHEN(RAWL OR H4L,H4L)*(1-RAWL);
+A5L:=VALUEWHEN(RAWL OR H5L,H5L)*(1-RAWL);
+NKL:=A1L+A2L+A3L+A4L+A5L;                             //已锁档数
+LKL:=NKL*LSTP*R0L;                                    //已锁定幅度
+//  动态止损价：未锁盈=初始止损；已锁盈=入场价+已锁幅度（只上不下）
+SLL:=S0L+DYNM*A1L*(R0L+LKL);
+L1S:=REF(LOW,1)<=ES-LSTP*R0S;
+L2S:=REF(LOW,1)<=ES-2*LSTP*R0S;
+L3S:=REF(LOW,1)<=ES-3*LSTP*R0S;
+L4S:=REF(LOW,1)<=ES-4*LSTP*R0S;
+L5S:=REF(LOW,1)<=ES-5*LSTP*R0S;
+A1S:=VALUEWHEN(RAWS OR L1S,L1S)*(1-RAWS);
+A2S:=VALUEWHEN(RAWS OR L2S,L2S)*(1-RAWS);
+A3S:=VALUEWHEN(RAWS OR L3S,L3S)*(1-RAWS);
+A4S:=VALUEWHEN(RAWS OR L4S,L4S)*(1-RAWS);
+A5S:=VALUEWHEN(RAWS OR L5S,L5S)*(1-RAWS);
+NKS:=A1S+A2S+A3S+A4S+A5S;
+LKS:=NKS*LSTP*R0S;
+SLS:=S0S-DYNM*A1S*(R0S+LKS);
+
+//——— 八、出场（动态止损或目标；NOT(RAWL/RAWS) 保证不在开仓当根离场）——
+EXA:=(LOW<=SLL OR (TGTW>0 AND HIGH>=TGL)) AND NOT(RAWL);
+EXB:=(HIGH>=SLS OR (TGTW>0 AND LOW<=TGS)) AND NOT(RAWS);
+
+//——— 九、持仓状态与信号（状态保持，无循环引用）————————
+HOLD_L:=VALUEWHEN(RAWL OR EXA,RAWL);                  //1=持多中
+HOLD_S:=VALUEWHEN(RAWS OR EXB,RAWS);                  //1=持空中
+BUY_S:=RAWL AND NOT(REF(HOLD_L,1)=1);
+SELL_S:=RAWS AND NOT(REF(HOLD_S,1)=1);
+EXITL_S:=REF(HOLD_L,1)=1 AND NOT(HOLD_L=1);           //多单离场（状态翻转那根）
+EXITS_S:=REF(HOLD_S,1)=1 AND NOT(HOLD_S=1);           //空单离场
+
+//——— 九之二、仓位管理（固定风险比例法 · 纯计算，可整段删除）———
+//  每笔最大亏损 = 账户资金 × RISKP
+//  每手最大亏损 = 初始止损距离(R0) × 合约乘数   ← 与品种波动自动匹配
+//  建议手数     = 资金×RISKP ÷ (R0×乘数)，再受「保证金占用上限」约束
+//  资金不足 1 手时输出 0 —— 表示该信号按风险纪律应当放弃
+WVN:=MAX(WV,0.0001);                          //当前波动（防暖机期除零）
+RPLC:=MAX(SW0*WVN*MULTC,0.0001);              //当前每手最大风险(元)
+LSNC:=INTPART(CAP0*RISKP/RPLC);               //当前建议手数（若此刻触发信号）
+RPL_L:=MAX(R0L*MULTC,0.0001);                 //多单每手最大风险(元)
+MGL_L:=MAX(EL*MULTC*MGRT,0.0001);             //多单单手保证金(元)
+LSR_L:=INTPART(CAP0*RISKP/RPL_L);             //多单：风险允许手数
+LSM_L:=INTPART(CAP0*MGTOT/MGL_L);             //多单：保证金允许手数
+LSL_L:=MIN(LSR_L,LSM_L);                      //多单：建议手数
+RPL_S:=MAX(R0S*MULTC,0.0001);                 //空单每手最大风险(元)
+MGL_S:=MAX(ES*MULTC*MGRT,0.0001);             //空单单手保证金(元)
+LSR_S:=INTPART(CAP0*RISKP/RPL_S);             //空单：风险允许手数
+LSM_S:=INTPART(CAP0*MGTOT/MGL_S);             //空单：保证金允许手数
+LSL_S:=MIN(LSR_S,LSM_S);                      //空单：建议手数
+
+
+//——— 十、区域底色（互斥）————————————————————
+DRAWGBK(POSHI AND GATE,RGB(0,0,0),RGB(90,0,0),0);
+DRAWGBK(POSLO AND GATE,RGB(0,0,0),RGB(0,90,0),0);
+
+//——— 十一、动态止损线（持仓期间显示，SHOWS=1 时画）——————
+DLS:=SLL*SHOWS*HOLD_L;
+DSS:=SLS*SHOWS*HOLD_S;
+PARTLINE(HOLD_L=1 AND SHOWS=1,DLS,COLORRED),LINETHICK2;
+PARTLINE(HOLD_S=1 AND SHOWS=1,DSS,COLORGREEN),LINETHICK2;
+
+//——— 十二、均线中枢与轨道（SHOWB=1 时画；默认不画）————
+BUP:=UPB*SHOWB;
+BDN:=DNB*SHOWB;
+BCE:=CEN*SHOWB;
+PARTLINE(SHOWB=1,BUP,COLORGREEN),LINETHICK2;
+PARTLINE(SHOWB=1,BDN,COLORRED),LINETHICK2;
+PARTLINE(SHOWB=1,BCE,COLORYELLOW);
+
+//——— 十三、当前周期K线（阳红/阴绿）————————————
+YANG:=CLOSE>=OPEN;
+YIN:=CLOSE<OPEN;
+STICKLINE(SHOWK=1 AND YANG,CLOSE,OPEN,COLORRED,0);
+STICKLINE(SHOWK=1 AND YIN,OPEN,CLOSE,COLORGREEN,0);
+DRAWLINE(SHOWK=1 AND YANG,HIGH,SHOWK=1 AND YANG,CLOSE,COLORRED);
+DRAWLINE(SHOWK=1 AND YANG,LOW,SHOWK=1 AND YANG,OPEN,COLORRED);
+DRAWLINE(SHOWK=1 AND YIN,HIGH,SHOWK=1 AND YIN,OPEN,COLORGREEN);
+DRAWLINE(SHOWK=1 AND YIN,LOW,SHOWK=1 AND YIN,CLOSE,COLORGREEN);
+
+//——— 十四、信号标记 ————————————————————————
+DRAWTEXT(BUY_S,DN1*0.997,'低阈挂多'),COLORRED;
+DRAWTEXT(SELL_S,UP1*1.003,'高阈挂空'),COLORGREEN;
+DRAWNUMBER(SHOWP=1 AND BUY_S,DN1*0.991,LSL_L,0,COLORRED);
+DRAWTEXT(SHOWP=1 AND BUY_S,DN1*0.983,'手(建议)'),COLORRED;
+DRAWNUMBER(SHOWP=1 AND SELL_S,UP1*1.009,LSL_S,0,COLORGREEN);
+DRAWTEXT(SHOWP=1 AND SELL_S,UP1*1.017,'手(建议)'),COLORGREEN;
+DRAWTEXT(EXITL_S,DLS*0.994,'多单离场'),COLORYELLOW;
+DRAWTEXT(EXITS_S,DSS*1.006,'空单离场'),COLORYELLOW;
+DRAWTEXT(HOLD_L=1,DLS*0.988,'持多·动态止损'),COLORRED;
+DRAWTEXT(HOLD_S=1,DSS*1.012,'持空·动态止损'),COLORGREEN;
+
+//——— 十五、状态面板（只在最后一根K线显示；把下面 SHOWPNL 改成 0 可整段关闭）———
+SHOWPNL:=1;                                         //1=显示面板  0=隐藏（面板是唯一占用K线上方空间的东西）
+SRNG:=MAX(HHV(HIGH,120)-LLV(LOW,120),CLOSE*0.01);
+SPAD:=SRNG*0.035;                                   //行距：原 0.10*SRNG → 0.035*SRNG，7 行总高仅 0.245*SRNG
+SY1:=HIGH+SPAD*1;
+SY2:=HIGH+SPAD*2;
+SY3:=HIGH+SPAD*3;
+SY4:=HIGH+SPAD*4;
+SY5:=HIGH+SPAD*5;
+SY6:=HIGH+SPAD*6;
+SY7:=HIGH+SPAD*7;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1,SY7,'【赢益共振 v9】均线中枢+波动轨+限价挂单+动态止损'),COLORYELLOW;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND SHOWP=1,SY6,'建议手数（资金×单笔风险÷每手止损额）：'),COLORYELLOW;
+DRAWNUMBER(ISLASTBAR=1 AND SHOWPNL=1 AND SHOWP=1,SY5,LSNC,0,COLORYELLOW);
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND GATE,SY4,'成本闸门：开·可交易'),COLORGREEN;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND NOT(GATE),SY4,'成本闸门：关·本档不做'),COLORRED;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND POSLO,SY3,'位置：低阈附近·伺机博反弹（挂多）'),COLORRED;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND POSHI,SY3,'位置：高阈附近·伺机博回调（挂空）'),COLORGREEN;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND NOT(POSLO) AND NOT(POSHI),SY3,'位置：中枢中部·此处不挂单'),COLORYELLOW;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND HOLD_L=1,SY2,'持仓：已挂多·动态止损跟随（图上红粗线）'),COLORRED;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND HOLD_S=1,SY2,'持仓：已挂空·动态止损跟随（图上绿粗线）'),COLORGREEN;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND NOT(HOLD_L) AND NOT(HOLD_S),SY2,'持仓：空仓·等触及'),COLORYELLOW;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND SLPV>0.5,SY1,'均线状态：向上'),COLORRED;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND SLPV<-0.5,SY1,'均线状态：向下'),COLORGREEN;
+DRAWTEXT(ISLASTBAR=1 AND SHOWPNL=1 AND ABS(SLPV)<=0.5,SY1,'均线状态：走平'),COLORYELLOW;
+</CODE>
+<VERSION>130112</VERSION>
