@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" width="120" alt="yingyi-resonance"></p>
+
 # 赢益共振 v9 · 60D 单品种独立版
 
 > **中文期货（郑商所四品种）60 分钟波段策略** · 文华财经 WH6 指标（`.XTRD`）
